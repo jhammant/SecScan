@@ -77,15 +77,47 @@ SYNTHESIS_SYSTEM = dedent("""
 
 
 def synthesize(client: LMStudioClient, result: RepoScanResult) -> Synthesis:
+    # Guard against grading empty inputs. If architecture extraction did not
+    # produce anything useful AND there are no per-file findings, the LLM has
+    # nothing to reason over — calling it anyway tends to produce confident F
+    # grades on non-existent evidence, which is worse than no report at all.
+    if _inputs_are_empty(result):
+        return Synthesis(
+            executive_summary=(
+                "Synthesis skipped: no architecture and no per-file findings were "
+                "available. This usually means the architecture extraction pass "
+                "failed (commonly: the loaded model's context window was smaller "
+                "than the prompt). Re-run with a model loaded at a larger context "
+                "length — see docs/CONFIGURATION.md — or check the scan log for an "
+                "arch_error event. No grades are produced for empty input."
+            ),
+        )
+
     user_payload = _build_synthesis_input(result) + "\n\n/no_think"
     try:
         data = client.complete_json(
-            SYNTHESIS_SYSTEM, user_payload, max_tokens=8192, temperature=0.15,
+            SYNTHESIS_SYSTEM, user_payload, max_tokens=4096, temperature=0.15,
         )
-    except LMStudioError:
-        return Synthesis(executive_summary="(synthesis failed)")
+    except LMStudioError as e:
+        return Synthesis(executive_summary=f"(synthesis failed: {e})")
 
     return _coerce(data, result)
+
+
+def _inputs_are_empty(result: RepoScanResult) -> bool:
+    arch = result.architecture
+    arch_empty = (
+        arch is None
+        or (
+            not arch.components
+            and not arch.integrations
+            and not arch.trust_boundaries
+            and not arch.data_flows
+        )
+    )
+    findings_empty = not any(fr.findings for fr in result.files)
+    deps_empty = not any(d.advisories for d in result.dependencies)
+    return arch_empty and findings_empty and deps_empty
 
 
 def _build_synthesis_input(result: RepoScanResult) -> str:

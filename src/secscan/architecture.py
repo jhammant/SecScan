@@ -9,7 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 from textwrap import dedent
 
-from .lmstudio_client import LMStudioClient, LMStudioError
+from .lmstudio_client import LMStudioClient
 from .models import Architecture, Component, ExternalIntegration, TrustBoundary
 from .repo_context import build_context
 
@@ -66,13 +66,12 @@ ARCHITECTURE_SYSTEM = dedent("""
 def extract_architecture(client: LMStudioClient, repo_root: Path) -> Architecture:
     ctx = build_context(repo_root)
     user = "Repo context:\n\n" + ctx.to_prompt_text() + "\n\n/no_think"
-    try:
-        data = client.complete_json(
-            ARCHITECTURE_SYSTEM, user, max_tokens=8192, temperature=0.1,
-        )
-    except LMStudioError:
-        return Architecture(summary="(architecture extraction failed)")
-
+    # Let LMStudioError bubble up; scanner.py converts it into an arch_error
+    # progress event so the failure is visible instead of producing a silent
+    # empty-architecture payload that downstream synthesis would grade F on.
+    data = client.complete_json(
+        ARCHITECTURE_SYSTEM, user, max_tokens=4096, temperature=0.1,
+    )
     return _coerce(data)
 
 

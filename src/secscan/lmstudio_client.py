@@ -135,7 +135,8 @@ class LMStudioClient:
             last_err = f"{r.status_code}: {r.text[:300]}"
             if r.status_code != 400:
                 break
-        raise LMStudioError(f"LMStudio {last_err}")
+        hint = _ctx_overflow_hint(last_err, max_tokens)
+        raise LMStudioError(f"LMStudio {last_err}{hint}")
 
     def complete_text(
         self,
@@ -188,6 +189,20 @@ def _parse_lms_ls(output: str) -> list[ModelInfo]:
         if "/" in ident or ident.endswith(".gguf"):
             models.append(ModelInfo(identifier=ident, loaded=loaded))
     return models
+
+
+def _ctx_overflow_hint(err: str, max_tokens: int) -> str:
+    """Append an actionable hint when the LM Studio error looks like a context
+    overflow. Many LM Studio errors for this case mention 'context' or
+    'tokens'; if so, point the user at the likely fix."""
+    low = err.lower()
+    if any(kw in low for kw in ("context", "too many tokens", "exceeds", "max_position", "sequence length")):
+        return (
+            f" — likely context overflow (requested max_tokens={max_tokens}). "
+            "Load the model in LM Studio with a larger --context-length (e.g. "
+            "`lms load <model> -c 32768`) or pick a model with a larger window."
+        )
+    return ""
 
 
 _JSON_BLOCK_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
