@@ -120,26 +120,36 @@ def _inputs_are_empty(result: RepoScanResult) -> bool:
     return arch_empty and findings_empty and deps_empty
 
 
-def _build_synthesis_input(result: RepoScanResult) -> str:
+_SYNTH_BUDGET_TOKENS = 12_000  # matches arch budget; leaves headroom for system + output
+
+def _build_synthesis_input(result: RepoScanResult, budget_tokens: int = _SYNTH_BUDGET_TOKENS) -> str:
+    """Build the synthesis user payload, capped at `budget_tokens`.
+
+    Sheds in priority order when over budget: per-finding count → findings
+    entirely → top_files/top_categories → dep summary → architecture (keep
+    until the very end; it's the most valuable input to reason across).
+    """
     findings = [f for fr in result.files for f in fr.findings]
     by_source = Counter(f.source for f in findings)
     top_files = Counter(f.file for f in findings).most_common(10)
     top_cats = Counter(f.category for f in findings).most_common(12)
 
     arch_json = result.architecture.model_dump() if result.architecture else {}
-    # Keep per-finding payload compact — enough for triage, not full evidence.
-    flat = [
-        {
-            "file": f.file,
-            "line": f.line_start,
-            "severity": f.severity.value,
-            "confidence": f.confidence,
-            "source": f.source,
-            "category": f.category,
-            "title": f.title,
-        }
-        for f in sorted(findings, key=lambda x: (-x.severity.weight, x.file))[:150]
-    ]
+
+    def _flatten(n_findings: int):
+        return [
+            {
+                "file": f.file,
+                "line": f.line_start,
+                "severity": f.severity.value,
+                "confidence": f.confidence,
+                "source": f.source,
+                "category": f.category,
+                "title": f.title,
+            }
+            for f in sorted(findings, key=lambda x: (-x.severity.weight, x.file))[:n_findings]
+        ]
+
     dep_summary = [
         {
             "ecosystem": d.ecosystem, "name": d.name, "version": d.version,
@@ -148,15 +158,36 @@ def _build_synthesis_input(result: RepoScanResult) -> str:
         for d in result.dependencies if d.advisories
     ][:50]
 
-    payload = {
-        "architecture": arch_json,
-        "counts_by_source": dict(by_source),
-        "top_files_by_finding_count": top_files,
-        "top_categories": top_cats,
-        "findings": flat,
-        "vulnerable_dependencies": dep_summary,
-    }
-    return "Review payload:\n\n" + json.dumps(payload, indent=2)
+    def _build(n_findings: int, include_tops: bool, include_deps: bool) -> str:
+        payload: dict = {
+            "architecture": arch_json,
+            "counts_by_source": dict(by_source),
+            "findings": _flatten(n_findings),
+        }
+        if include_tops:
+            payload["top_files_by_finding_count"] = top_files
+            payload["top_categories"] = top_cats
+        if include_deps:
+            payload["vulnerable_dependencies"] = dep_summary
+        return "Review payload:\n\n" + json.dumps(payload, indent=2)
+
+    budget_chars = int(budget_tokens * 3.5)
+    # Progressive shedding — each step drops progressively more content.
+    for n_findings, tops, deps in [
+        (150, True, True),
+        (80, True, True),
+        (40, True, True),
+        (20, False, True),
+        (20, False, False),
+        (0, False, True),
+        (0, False, False),
+    ]:
+        payload = _build(n_findings, tops, deps)
+        if len(payload) <= budget_chars:
+            return payload
+
+    # Last resort: architecture-only
+    return "Review payload:\n\n" + json.dumps({"architecture": arch_json}, indent=2)[:budget_chars]
 
 
 def _coerce(data: dict, result: RepoScanResult) -> Synthesis:

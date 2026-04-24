@@ -46,14 +46,43 @@ _MERGE_BUDGET_TOKENS = 10_000         # final merge prompt budget
 # rather than getting its own LLM call. Keeps us from burning a call on a
 # two-file utility directory.
 _MIN_FILES_PER_SUBSYSTEM = 5
+# A subsystem with more files than this is recursively split into its
+# immediate children. Critical for repos like chia-blockchain where a single
+# top-level dir (`chia/`) holds 500+ files and a tree-only prompt loses all
+# the useful context. Split into `chia/server/`, `chia/rpc/`, etc.
+_MAX_FILES_PER_SUBSYSTEM = 180
+# Cap on recursion depth during subsystem splitting. Prevents pathological
+# repos with deeply nested single-file directories from producing thousands of
+# micro-subsystems.
+_MAX_SPLIT_DEPTH = 3
 
 # Directories at the repo root that never stand on their own as a subsystem.
+# Also catches underscore variants like `_tests`, `__tests__`, `testutils`.
 _NON_SUBSYSTEM_DIRS = set(SKIP_DIRS) | {
-    "tests", "test", "docs", "doc", "examples", "example",
+    "tests", "test", "_tests", "_test", "__tests__", "__test__",
+    "testutils", "test_utils", "testing", "testdata", "test_data",
+    "docs", "doc", "_docs", "documentation",
+    "examples", "example", "_examples", "samples", "sample", "demos", "demo",
     ".github", ".gitlab", "ci", "scripts", "script", "tools",
     "assets", "images", "fonts", "locale", "locales", "i18n",
     "benchmarks", "benchmark", "fixtures", "fixture",
+    "mocks", "mock", "e2e", "integration_tests",
+    "build_scripts",                 # packaging, not application logic
+    "vendor", "third_party", "third-party", "deps",
 }
+
+
+def _is_subsystem_candidate_name(name: str) -> bool:
+    """Return False if the dir name looks like test/docs/CI/scaffolding."""
+    if name in _NON_SUBSYSTEM_DIRS or name.startswith("."):
+        return False
+    lo = name.lower()
+    # Catch variants: anything containing 'test' as a whole word-ish token.
+    if lo in {"tests", "test"} or lo.startswith(("_test", "test_", "tests_")):
+        return False
+    if lo.endswith(("_test", "_tests", "-test", "-tests")):
+        return False
+    return True
 
 
 ProgressFn = Callable[[str, dict], None]
@@ -95,31 +124,79 @@ class Subsystem:
 # ---------------- subsystem discovery ----------------
 
 def discover_subsystems(repo_root: Path) -> list[Subsystem]:
-    """Find useful top-level code directories. Empty list means the repo is
-    small/flat — caller should use flat extraction instead."""
+    """Find useful source directories, recursively splitting huge ones.
+
+    Empty list means the repo is small/flat — caller should use flat extraction.
+
+    Splitting rule: any directory with more than `_MAX_FILES_PER_SUBSYSTEM`
+    files gets split into its immediate child directories. Without this a repo
+    like chia-blockchain (500 files under one `chia/` dir) would collapse to
+    a single tree-only subsystem where the LLM has nothing rich to reason over.
+    """
     subs: list[Subsystem] = []
     for p in sorted(repo_root.iterdir()):
         if not p.is_dir():
             continue
-        if p.name in _NON_SUBSYSTEM_DIRS or p.name.startswith("."):
+        if not _is_subsystem_candidate_name(p.name):
             continue
-        # Nested monorepo: `packages/` or `apps/` — drill one level deeper.
+        # Nested monorepo roots — drill one level deeper unconditionally.
         if p.name in {"packages", "apps", "services", "modules", "crates"}:
             for sub in sorted(p.iterdir()):
-                if not sub.is_dir() or sub.name in _NON_SUBSYSTEM_DIRS:
+                if not sub.is_dir() or not _is_subsystem_candidate_name(sub.name):
                     continue
                 n = _count_files(sub)
                 if n >= _MIN_FILES_PER_SUBSYSTEM:
-                    subs.append(Subsystem(name=f"{p.name}/{sub.name}", root=sub, file_count=n))
+                    _split_or_add(
+                        Subsystem(name=f"{p.name}/{sub.name}", root=sub, file_count=n),
+                        subs, depth=1,
+                    )
             continue
         n = _count_files(p)
         if n >= _MIN_FILES_PER_SUBSYSTEM:
-            subs.append(Subsystem(name=p.name, root=p, file_count=n))
+            _split_or_add(Subsystem(name=p.name, root=p, file_count=n), subs, depth=1)
     # Include root-level scripts as a synthetic "<root>" subsystem if significant
     root_files = sum(1 for c in repo_root.iterdir() if c.is_file())
     if root_files >= 3:
         subs.append(Subsystem(name="<root>", root=repo_root, file_count=root_files))
     return subs
+
+
+def _split_or_add(sub: Subsystem, out: list[Subsystem], *, depth: int) -> None:
+    """Add `sub` to `out`. If it has more than `_MAX_FILES_PER_SUBSYSTEM` files
+    and we haven't hit split-depth cap, recurse into its children instead."""
+    if sub.file_count <= _MAX_FILES_PER_SUBSYSTEM or depth >= _MAX_SPLIT_DEPTH:
+        out.append(sub)
+        return
+
+    child_subs_added = 0
+    for child in sorted(sub.root.iterdir()):
+        if not child.is_dir():
+            continue
+        if not _is_subsystem_candidate_name(child.name):
+            continue
+        n = _count_files(child)
+        if n >= _MIN_FILES_PER_SUBSYSTEM:
+            _split_or_add(
+                Subsystem(name=f"{sub.name}/{child.name}", root=child, file_count=n),
+                out, depth=depth + 1,
+            )
+            child_subs_added += 1
+
+    # Also capture files sitting directly under `sub` (not in any subdir) as a
+    # synthetic leaf — otherwise a top-level __init__.py with meaningful content
+    # gets dropped.
+    direct_files = sum(1 for c in sub.root.iterdir() if c.is_file())
+    if direct_files >= _MIN_FILES_PER_SUBSYSTEM:
+        # We don't want to rescan sub.root (that'd re-count child dirs).
+        # A synthetic entry scoped to this dir's direct files would need a
+        # different collector; for v1, fold into the parent name.
+        out.append(Subsystem(name=f"{sub.name}/<root>", root=sub.root,
+                              file_count=direct_files))
+
+    # Fallback: if the dir had no splittable children at all (e.g. one flat
+    # folder with 500 files), add it as-is so it doesn't vanish.
+    if child_subs_added == 0 and direct_files < _MIN_FILES_PER_SUBSYSTEM:
+        out.append(sub)
 
 
 def _count_files(directory: Path) -> int:
