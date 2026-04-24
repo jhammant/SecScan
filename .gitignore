@@ -1,0 +1,15 @@
+.env
+.secscan/
+.claude/
+
+# Launch / marketing copy — kept local, not shared
+docs/LINKEDIN_POST.md
+__pycache__/
+*.pyc
+.venv/
+venv/
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/

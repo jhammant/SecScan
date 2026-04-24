@@ -1,0 +1,115 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 500" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Text', Inter, Segoe UI, sans-serif">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0f172a"/>
+      <stop offset="1" stop-color="#020617"/>
+    </linearGradient>
+    <linearGradient id="llm" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#7c3aed"/>
+      <stop offset="1" stop-color="#4f46e5"/>
+    </linearGradient>
+    <linearGradient id="det" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0ea5e9"/>
+      <stop offset="1" stop-color="#0369a1"/>
+    </linearGradient>
+    <linearGradient id="safe" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#059669"/>
+      <stop offset="1" stop-color="#047857"/>
+    </linearGradient>
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="4" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#94a3b8"/>
+    </marker>
+  </defs>
+  <rect width="980" height="500" fill="url(#bg)"/>
+
+  <!-- Title -->
+  <text x="40" y="50" fill="#e2e8f0" font-size="26" font-weight="700">SecScan pipeline</text>
+  <text x="40" y="75" fill="#94a3b8" font-size="14">local-LLM security scanner — everything stays on your machine</text>
+
+  <!-- Stage 1: clone + filter -->
+  <g transform="translate(40,190)">
+    <rect width="170" height="76" rx="12" fill="#1e293b" stroke="#334155"/>
+    <text x="85" y="30" text-anchor="middle" fill="#e2e8f0" font-size="14" font-weight="600">Clone + walk</text>
+    <text x="85" y="52" text-anchor="middle" fill="#94a3b8" font-size="12">shallow git clone</text>
+    <text x="85" y="68" text-anchor="middle" fill="#94a3b8" font-size="12">skip lockfiles, binaries</text>
+  </g>
+
+  <line x1="215" y1="228" x2="250" y2="228" stroke="#94a3b8" stroke-width="2" marker-end="url(#arr)"/>
+
+  <!-- Branching: LLM lenses, secrets, deps -->
+  <g transform="translate(260,120)">
+    <rect width="200" height="76" rx="12" fill="url(#llm)" filter="url(#glow)"/>
+    <text x="100" y="30" text-anchor="middle" fill="#ffffff" font-size="14" font-weight="600">Per-file LLM lenses</text>
+    <text x="100" y="52" text-anchor="middle" fill="#e9d5ff" font-size="12">security · quality · perf</text>
+    <text x="100" y="68" text-anchor="middle" fill="#e9d5ff" font-size="12">reliability · correctness · cicd</text>
+  </g>
+
+  <g transform="translate(260,230)">
+    <rect width="200" height="72" rx="12" fill="url(#det)"/>
+    <text x="100" y="30" text-anchor="middle" fill="#ffffff" font-size="14" font-weight="600">Secrets regex</text>
+    <text x="100" y="52" text-anchor="middle" fill="#bae6fd" font-size="12">gitleaks-style rules</text>
+    <text x="100" y="66" text-anchor="middle" fill="#bae6fd" font-size="11">path-aware, no hallucinations</text>
+  </g>
+
+  <g transform="translate(260,332)">
+    <rect width="200" height="72" rx="12" fill="url(#det)"/>
+    <text x="100" y="30" text-anchor="middle" fill="#ffffff" font-size="14" font-weight="600">Dependency CVEs</text>
+    <text x="100" y="52" text-anchor="middle" fill="#bae6fd" font-size="12">OSV.dev batch query</text>
+    <text x="100" y="66" text-anchor="middle" fill="#bae6fd" font-size="11">npm · PyPI · Go · Rust · Ruby</text>
+  </g>
+
+  <!-- Architecture + Synthesis column -->
+  <line x1="465" y1="156" x2="500" y2="156" stroke="#94a3b8" stroke-width="2" marker-end="url(#arr)"/>
+  <line x1="465" y1="268" x2="500" y2="268" stroke="#94a3b8" stroke-width="2" marker-end="url(#arr)"/>
+  <line x1="465" y1="368" x2="500" y2="368" stroke="#94a3b8" stroke-width="2" marker-end="url(#arr)"/>
+
+  <g transform="translate(510,175)">
+    <rect width="220" height="80" rx="12" fill="url(#llm)" filter="url(#glow)"/>
+    <text x="110" y="30" text-anchor="middle" fill="#ffffff" font-size="14" font-weight="600">Architecture extraction</text>
+    <text x="110" y="52" text-anchor="middle" fill="#e9d5ff" font-size="12">components · integrations</text>
+    <text x="110" y="68" text-anchor="middle" fill="#e9d5ff" font-size="12">trust boundaries · data flows</text>
+  </g>
+
+  <g transform="translate(510,285)">
+    <rect width="220" height="80" rx="12" fill="url(#llm)" filter="url(#glow)"/>
+    <text x="110" y="30" text-anchor="middle" fill="#ffffff" font-size="14" font-weight="600">Threat-model synthesis</text>
+    <text x="110" y="52" text-anchor="middle" fill="#e9d5ff" font-size="12">cross-cutting findings</text>
+    <text x="110" y="68" text-anchor="middle" fill="#e9d5ff" font-size="12">hotspots · grades · exec summary</text>
+  </g>
+
+  <line x1="735" y1="215" x2="770" y2="215" stroke="#94a3b8" stroke-width="2" marker-end="url(#arr)"/>
+  <line x1="735" y1="325" x2="770" y2="325" stroke="#94a3b8" stroke-width="2" marker-end="url(#arr)"/>
+
+  <!-- Report + optional exploit -->
+  <g transform="translate(780,175)">
+    <rect width="160" height="80" rx="12" fill="#1e293b" stroke="#334155"/>
+    <text x="80" y="30" text-anchor="middle" fill="#e2e8f0" font-size="14" font-weight="600">Markdown + JSON</text>
+    <text x="80" y="52" text-anchor="middle" fill="#94a3b8" font-size="12">severity-ranked</text>
+    <text x="80" y="68" text-anchor="middle" fill="#94a3b8" font-size="12">file:line citations</text>
+  </g>
+
+  <g transform="translate(780,285)">
+    <rect width="160" height="80" rx="12" fill="url(#safe)"/>
+    <text x="80" y="26" text-anchor="middle" fill="#ffffff" font-size="14" font-weight="600">Sandbox PoC</text>
+    <text x="80" y="46" text-anchor="middle" fill="#bbf7d0" font-size="11">Docker --internal net</text>
+    <text x="80" y="60" text-anchor="middle" fill="#bbf7d0" font-size="11">read-only · no egress</text>
+    <text x="80" y="74" text-anchor="middle" fill="#bbf7d0" font-size="11">opt-in, review first</text>
+  </g>
+
+  <!-- Legend -->
+  <g transform="translate(40,425)">
+    <rect width="16" height="16" rx="4" fill="url(#llm)"/>
+    <text x="24" y="13" fill="#cbd5e1" font-size="12">local LLM (LM Studio)</text>
+    <rect x="180" width="16" height="16" rx="4" fill="url(#det)"/>
+    <text x="204" y="13" fill="#cbd5e1" font-size="12">deterministic pass</text>
+    <rect x="340" width="16" height="16" rx="4" fill="url(#safe)"/>
+    <text x="364" y="13" fill="#cbd5e1" font-size="12">sandboxed (opt-in)</text>
+  </g>
+
+  <text x="40" y="475" fill="#64748b" font-size="11">Your source never leaves your machine.</text>
+</svg>
