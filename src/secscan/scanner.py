@@ -155,12 +155,30 @@ class Scanner:
             except Exception as e:
                 self.progress("deps_error", {"repo": label, "err": str(e)})
 
-        # --- architecture pass (one big LLM call) ---
+        # --- architecture pass (one LLM call for small repos, map-reduce for big) ---
         if self.opts.enable_architecture:
             try:
                 from .architecture import extract_architecture
+                from .architecture_hierarchical import (
+                    extract_architecture_hierarchical,
+                    flat_context_fits_budget,
+                )
                 self.progress("arch_start", {"repo": label})
-                result.architecture = extract_architecture(self.lm, path)
+                # If the flat repo-context prompt wouldn't fit ~12k tokens, go
+                # hierarchical: one LLM call per subsystem, then one merge call.
+                # Small/flat repos still use the fast single-call path.
+                fits = flat_context_fits_budget(path)
+                self.progress("arch_mode", {"repo": label,
+                                              "mode": "flat" if fits else "hierarchical"})
+                if fits:
+                    result.architecture = extract_architecture(self.lm, path)
+                else:
+                    def _arch_progress(evt, data):
+                        # Re-surface subsystem events under arch_* names for log clarity
+                        self.progress(f"arch_{evt}", {**data, "repo": label})
+                    result.architecture = extract_architecture_hierarchical(
+                        self.lm, path, progress=_arch_progress,
+                    )
                 self.progress("arch_done", {"repo": label})
             except Exception as e:
                 self.progress("arch_error", {"repo": label, "err": str(e)})

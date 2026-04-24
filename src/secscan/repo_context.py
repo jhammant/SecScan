@@ -36,6 +36,16 @@ _FILE_BUDGET = 6_000            # per-file char cap before truncation
 _TREE_MAX_ENTRIES = 400         # cap on tree entries
 _GREP_MAX = 40                  # cap per category
 
+# Rough tokens ≈ chars / _CHARS_PER_TOKEN. Good enough for budget sizing;
+# models will tokenize differently but the ratio is stable for English + code.
+_CHARS_PER_TOKEN = 3.5
+# Reserve room for the system prompt + the model's expected output.
+# A safe default target for a 32k-context model:
+#   system prompt ~ 1.5k tokens, reserved output ~ 4k tokens → budget ~ 24k tokens
+#   for the user payload. We default to a conservative 12k so even 16k-context
+#   models don't overflow; callers override via `budget_tokens`.
+DEFAULT_PROMPT_BUDGET_TOKENS = 12_000
+
 
 @dataclass
 class RepoContext:
@@ -47,32 +57,53 @@ class RepoContext:
     env_var_hints: list[str] = field(default_factory=list)      # grepped env var reads
     dep_summary: dict[str, list[str]] = field(default_factory=dict)  # ecosystem -> names
 
-    def to_prompt_text(self) -> str:
-        parts: list[str] = []
-        parts.append("## Repo tree (pruned)")
-        parts.append("\n".join(self.tree))
-        if self.dep_summary:
-            parts.append("\n## Declared dependencies")
-            for eco, names in self.dep_summary.items():
-                parts.append(f"- {eco}: {', '.join(names[:60])}" + ("…" if len(names) > 60 else ""))
-        if self.route_hints:
-            parts.append("\n## Route/handler hints")
-            parts.extend(self.route_hints[:_GREP_MAX])
-        if self.http_client_hints:
-            parts.append("\n## Outbound HTTP / integration hints")
-            parts.extend(self.http_client_hints[:_GREP_MAX])
-        if self.env_var_hints:
-            parts.append("\n## Env var reads")
-            parts.extend(self.env_var_hints[:_GREP_MAX])
-        if self.entrypoints:
-            parts.append("\n## Entrypoint files")
-            for rel, content in self.entrypoints.items():
-                parts.append(f"\n### {rel}\n```\n{content}\n```")
-        if self.config_snippets:
-            parts.append("\n## Config snippets")
-            for rel, content in self.config_snippets.items():
-                parts.append(f"\n### {rel}\n```\n{content}\n```")
-        return "\n".join(parts)
+    def to_prompt_text(self, budget_tokens: int = DEFAULT_PROMPT_BUDGET_TOKENS) -> str:
+        """Render the context as prompt text, guaranteed <= budget_tokens (approx).
+
+        Strategy when over budget, in order:
+          1. Shrink entrypoint file bodies (halve, then quarter, then drop)
+          2. Shrink config snippet bodies (same)
+          3. Shrink grep-hint lists (halve the cap)
+          4. Truncate the tree list
+
+        The tree and deps summary are preserved as long as possible — they're
+        cheap and essential for orientation. Entrypoint/config BODIES are the
+        biggest load and the first to shed.
+        """
+        budget_chars = int(budget_tokens * _CHARS_PER_TOKEN)
+        # Try full first
+        rendered = _render(self, file_budget=_FILE_BUDGET, grep_cap=_GREP_MAX,
+                           tree_cap=_TREE_MAX_ENTRIES)
+        if len(rendered) <= budget_chars:
+            return rendered
+
+        # Step 1: halve per-file content
+        for scale in (2, 4, 8):
+            rendered = _render(self, file_budget=_FILE_BUDGET // scale, grep_cap=_GREP_MAX,
+                               tree_cap=_TREE_MAX_ENTRIES)
+            if len(rendered) <= budget_chars:
+                return rendered
+
+        # Step 2: drop entrypoint + config bodies, keep tree + deps + grep
+        rendered = _render(self, file_budget=0, grep_cap=_GREP_MAX,
+                           tree_cap=_TREE_MAX_ENTRIES)
+        if len(rendered) <= budget_chars:
+            return rendered
+
+        # Step 3: halve then quarter grep caps
+        for gcap in (_GREP_MAX // 2, _GREP_MAX // 4, 0):
+            rendered = _render(self, file_budget=0, grep_cap=gcap, tree_cap=_TREE_MAX_ENTRIES)
+            if len(rendered) <= budget_chars:
+                return rendered
+
+        # Step 4: truncate the tree, last resort
+        for tcap in (200, 100, 50):
+            rendered = _render(self, file_budget=0, grep_cap=0, tree_cap=tcap)
+            if len(rendered) <= budget_chars:
+                return rendered
+
+        # Give up gracefully — return minimal tree that fits exactly
+        return _render(self, file_budget=0, grep_cap=0, tree_cap=20) + "\n... (severely truncated to fit budget)"
 
 
 # ---------------- building ----------------
@@ -85,6 +116,53 @@ def build_context(repo_root: Path) -> RepoContext:
     _grep_hints(repo_root, ctx)
     _dep_summary(repo_root, ctx)
     return ctx
+
+
+def _render(
+    ctx: "RepoContext",
+    *,
+    file_budget: int,
+    grep_cap: int,
+    tree_cap: int,
+) -> str:
+    """Render RepoContext to prompt text with the given knobs applied."""
+    parts: list[str] = []
+
+    tree = ctx.tree[:tree_cap] if tree_cap > 0 else []
+    if len(ctx.tree) > tree_cap and tree_cap > 0:
+        tree = tree + [f"... (+{len(ctx.tree) - tree_cap} more, truncated)"]
+    parts.append("## Repo tree (pruned)")
+    parts.append("\n".join(tree) if tree else "(omitted)")
+
+    if ctx.dep_summary:
+        parts.append("\n## Declared dependencies")
+        for eco, names in ctx.dep_summary.items():
+            parts.append(f"- {eco}: {', '.join(names[:60])}" + ("…" if len(names) > 60 else ""))
+
+    if grep_cap > 0:
+        if ctx.route_hints:
+            parts.append("\n## Route/handler hints")
+            parts.extend(ctx.route_hints[:grep_cap])
+        if ctx.http_client_hints:
+            parts.append("\n## Outbound HTTP / integration hints")
+            parts.extend(ctx.http_client_hints[:grep_cap])
+        if ctx.env_var_hints:
+            parts.append("\n## Env var reads")
+            parts.extend(ctx.env_var_hints[:grep_cap])
+
+    if file_budget > 0 and ctx.entrypoints:
+        parts.append("\n## Entrypoint files")
+        for rel, content in ctx.entrypoints.items():
+            body = content if len(content) <= file_budget else content[:file_budget] + "\n... (truncated)"
+            parts.append(f"\n### {rel}\n```\n{body}\n```")
+
+    if file_budget > 0 and ctx.config_snippets:
+        parts.append("\n## Config snippets")
+        for rel, content in ctx.config_snippets.items():
+            body = content if len(content) <= file_budget else content[:file_budget] + "\n... (truncated)"
+            parts.append(f"\n### {rel}\n```\n{body}\n```")
+
+    return "\n".join(parts)
 
 
 def _collect_tree(repo_root: Path, ctx: RepoContext) -> None:

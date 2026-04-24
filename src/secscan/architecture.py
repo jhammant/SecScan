@@ -63,14 +63,31 @@ ARCHITECTURE_SYSTEM = dedent("""
 """).strip()
 
 
-def extract_architecture(client: LMStudioClient, repo_root: Path) -> Architecture:
+def extract_architecture(
+    client: LMStudioClient,
+    repo_root: Path,
+    *,
+    prompt_budget_tokens: int = 12_000,
+    max_tokens: int = 4096,
+) -> Architecture:
+    """Flat single-call architecture extraction.
+
+    For very large repos where even a budgeted prompt would lose too much
+    signal, callers should use `extract_architecture_hierarchical` instead —
+    see architecture_hierarchical.py (auto-triggered by scanner.py when
+    repo_context measures over `flat_threshold_tokens`).
+    """
     ctx = build_context(repo_root)
-    user = "Repo context:\n\n" + ctx.to_prompt_text() + "\n\n/no_think"
+    user = (
+        "Repo context:\n\n"
+        + ctx.to_prompt_text(budget_tokens=prompt_budget_tokens)
+        + "\n\n/no_think"
+    )
     # Let LMStudioError bubble up; scanner.py converts it into an arch_error
     # progress event so the failure is visible instead of producing a silent
     # empty-architecture payload that downstream synthesis would grade F on.
     data = client.complete_json(
-        ARCHITECTURE_SYSTEM, user, max_tokens=4096, temperature=0.1,
+        ARCHITECTURE_SYSTEM, user, max_tokens=max_tokens, temperature=0.1,
     )
     return _coerce(data)
 

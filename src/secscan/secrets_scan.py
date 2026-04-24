@@ -84,6 +84,37 @@ _RULES: list[SecretRule] = [
 _SKIP_NAME = {"test_secrets", "secrets_test"}
 _SKIP_EXT_FOR_GENERIC = {".md", ".txt", ".rst"}
 
+# Path segments / patterns that indicate test fixtures, example data, simulators,
+# or CI-only material. Files under any of these are skipped for secrets detection
+# — a PEM in chia/simulator/ssl_certs_5.py is a known test cert, not a leaked key.
+# Matched against the path (case-insensitive) as a substring; order-insensitive.
+_FIXTURE_PATH_HINTS = (
+    "/simulator/", "/simulators/",
+    "/testdata/", "/test_data/", "/test-data/",
+    "/fixtures/", "/fixture/",
+    "/ssl_certs", "/tls_certs", "/test_certs",
+    "/mocks/", "/mock/",
+    "/examples/", "/example/",
+    "/samples/", "/sample/",
+    "/demo/", "/demos/",
+    "/e2e/", "/integration_test/",
+)
+
+# Filename tokens that flag the file itself as fixture material regardless
+# of its directory. Matched as substring (case-insensitive) on the basename.
+_FIXTURE_FILENAME_HINTS = (
+    "ssl_certs", "test_certs", "tls_certs", "testcerts", "testkeys", "testcert",
+    "mock_keys", "demo_keys", "sample_keys", "example_keys",
+)
+
+
+def _is_fixture_path(rel: str) -> bool:
+    lo = "/" + rel.lower().replace("\\", "/")
+    if any(hint in lo for hint in _FIXTURE_PATH_HINTS):
+        return True
+    basename = lo.rsplit("/", 1)[-1]
+    return any(tok in basename for tok in _FIXTURE_FILENAME_HINTS)
+
 
 def _extract_snippet(text: str, start: int, end: int, pad: int = 40) -> tuple[int, str]:
     """Return (line_number, snippet). Snippet is masked for the matched region."""
@@ -161,6 +192,8 @@ def scan_secrets(repo_root: Path) -> list[Finding]:
         except ValueError:
             continue
         if any(name in rel for name in _SKIP_NAME):
+            continue
+        if _is_fixture_path(rel):
             continue
         out.extend(scan_file_for_secrets(p, rel))
     return out
