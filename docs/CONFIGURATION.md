@@ -52,9 +52,34 @@ The scanner has been tested with:
 
 Rules of thumb:
 
-- **Reasoning models** (qwen3, DeepSeek-R1, etc.) burn tokens on `<think>`. Default `max_tokens` is 8192 to compensate.
+- **Reasoning models** (qwen3, DeepSeek-R1, etc.) burn tokens on `<think>`. Architecture and synthesis passes request up to 4096 output tokens each.
 - For per-file scanning on a slow model, turn on `SECSCAN_RISK_FIRST=1` to cut file count.
 - For a huge org, use `--no-files` to get architecture + threat model + deps + secrets in ~15 min/repo.
+
+## Context window & parallel slots (common footgun)
+
+LM Studio's `--parallel N` flag **divides the loaded context among N slots**. A model loaded with `-c 32768 --parallel 4` gives each request only **8,192** tokens — not 32k. The scan will fail mid-architecture with:
+
+```text
+LMStudio 400: {"error":"Context size has been exceeded."}
+```
+
+…even though `lms ps` happily reports a 32k context.
+
+Rules:
+
+- For SecScan's architecture + synthesis passes (prompt ~5–12k tokens + up to 4k output), you want **at least 16k effective per slot**.
+- Either load with `--parallel 1`:
+  ```bash
+  lms load <model> --context-length 32768 --parallel 1 --identifier secscan-32k
+  ```
+- Or load with enough total context that `context ÷ parallel ≥ 16384`:
+  ```bash
+  lms load <model> --context-length 65536 --parallel 4
+  ```
+- On very large C++ / monorepo targets, the hierarchical-arch path issues one LLM call per subsystem plus a merge pass — each of those calls is independent and still needs enough effective context. The `--parallel 1` recipe is the safe default.
+
+If architecture extraction fails, SecScan now surfaces the LM Studio error (with a hint) in both the scan log and the generated report — it no longer silently emits an empty-architecture placeholder.
 
 ## Checking your setup
 
