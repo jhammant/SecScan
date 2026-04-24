@@ -100,6 +100,12 @@ class LMStudioClient:
           3. no response_format — plain text, recovered via `_extract_json`
 
         Whichever succeeds gets cached per-instance so subsequent calls skip retries.
+
+        We also transparently recover from LM Studio auto-unloading the model
+        mid-run (JIT eviction, idle timeout). On a 400 whose error text contains
+        "Model unloaded" / "Invalid model identifier" we try `lms load <model>`
+        once and retry the same call. Gives up after one reload attempt to
+        avoid infinite loops when the model is genuinely gone.
         """
         model_id = model or self.model
         if not model_id:
@@ -121,20 +127,29 @@ class LMStudioClient:
         else:
             modes_to_try = [{"type": "json_object"}, {"type": "text"}, None]
 
+        reload_attempted = False
         last_err: str = ""
-        for mode in modes_to_try:
-            payload = dict(base)
-            if mode is not None:
-                payload["response_format"] = mode
-            r = self._http.post("/chat/completions", json=payload)
-            if r.status_code < 400:
-                # Cache the first mode that worked so we don't keep probing.
-                self._json_mode = mode
-                content = r.json()["choices"][0]["message"]["content"]
-                return _extract_json(content)
-            last_err = f"{r.status_code}: {r.text[:300]}"
-            if r.status_code != 400:
-                break
+        attempt = 0
+        while attempt < 2:  # 0 = first try, 1 = retry after reload
+            attempt += 1
+            for mode in modes_to_try:
+                payload = dict(base)
+                if mode is not None:
+                    payload["response_format"] = mode
+                r = self._http.post("/chat/completions", json=payload)
+                if r.status_code < 400:
+                    self._json_mode = mode
+                    content = r.json()["choices"][0]["message"]["content"]
+                    return _extract_json(content)
+                last_err = f"{r.status_code}: {r.text[:300]}"
+                if r.status_code != 400:
+                    break
+            if _is_model_unloaded(last_err) and not reload_attempted:
+                reload_attempted = True
+                if _try_reload_model(model_id):
+                    continue  # retry the whole mode loop
+            break
+
         hint = _ctx_overflow_hint(last_err, max_tokens)
         raise LMStudioError(f"LMStudio {last_err}{hint}")
 
@@ -165,6 +180,39 @@ class LMStudioClient:
 
 
 # ---------- helpers ----------
+
+_MODEL_UNLOADED_KEYWORDS = (
+    "model unloaded",
+    "invalid model identifier",
+    "model not found",
+    "no model is loaded",
+)
+
+
+def _is_model_unloaded(err_text: str) -> bool:
+    """True if the LM Studio error indicates the model is no longer available."""
+    lo = err_text.lower()
+    return any(k in lo for k in _MODEL_UNLOADED_KEYWORDS)
+
+
+def _try_reload_model(model_id: str) -> bool:
+    """Attempt to re-load a model via `lms load`. Returns True on success.
+
+    Silently no-ops (returns False) when the `lms` CLI isn't installed — users
+    running LM Studio headlessly without the CLI need to rely on the GUI's
+    auto-reload or manual reload.
+    """
+    if not shutil.which("lms"):
+        return False
+    try:
+        subprocess.run(
+            ["lms", "load", model_id, "--yes"],
+            check=True, capture_output=True, text=True, timeout=120,
+        )
+        return True
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+        return False
+
 
 def _run(cmd: list[str]) -> str:
     try:
