@@ -56,9 +56,9 @@
 
   <g transform="translate(620,340)">
     <rect width="250" height="140" rx="16" fill="#0f172a" stroke="#334155"/>
-    <text x="24" y="40" fill="#94a3b8" font-size="13" font-weight="600" letter-spacing="1">FALSE POSITIVES</text>
-    <text x="24" y="100" fill="#e2e8f0" font-size="64" font-weight="800">~70%</text>
-    <text x="24" y="122" fill="#64748b" font-size="13">of LLM "critical" findings</text>
+    <text x="24" y="40" fill="#94a3b8" font-size="13" font-weight="600" letter-spacing="1">SCAN PASSES</text>
+    <text x="24" y="100" fill="#e2e8f0" font-size="64" font-weight="800">4</text>
+    <text x="24" y="122" fill="#64748b" font-size="13">per repo · arch + threat + deps + secrets</text>
   </g>
 
   <g transform="translate(890,340)">
