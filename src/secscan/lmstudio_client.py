@@ -257,20 +257,176 @@ def _ctx_overflow_hint(err: str, max_tokens: int) -> str:
 
 
 _JSON_BLOCK_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
+_LINE_COMMENT_RE = re.compile(r"//[^\n]*")
+_BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
 
 
 def _extract_json(content: str) -> dict[str, Any]:
+    """Parse JSON from a model's chat completion, with fallbacks for common
+    LLM output glitches.
+
+    Strategy, in order:
+      1. Plain `json.loads` on the stripped content.
+      2. Pull out a ```json fenced``` block if present.
+      3. Slice the outermost {...} from the surrounding prose.
+      4. Run the sliced text through `_repair_json` — strips comments,
+         removes trailing commas, and iteratively asks `json.loads` where
+         it choked, inserting commas at those positions. Recovers the
+         classic 27B-class failure mode of dropping commas between
+         sibling array elements or object fields.
+    """
     content = content.strip()
     try:
         return json.loads(content)
     except json.JSONDecodeError:
         pass
+
     m = _JSON_BLOCK_RE.search(content)
     if m:
-        return json.loads(m.group(1))
-    # Last resort: grab the outermost braces
+        try:
+            return json.loads(m.group(1))
+        except json.JSONDecodeError:
+            content = m.group(1)  # fall through to repair on the fenced payload
+
+    # Slice outermost braces — drops <think>...</think> prefixes and stray suffixes
     start = content.find("{")
     end = content.rfind("}")
-    if start >= 0 and end > start:
-        return json.loads(content[start : end + 1])
-    raise LMStudioError(f"Could not parse JSON from model output: {content[:200]!r}")
+    if start < 0 or end <= start:
+        raise LMStudioError(f"Could not parse JSON from model output: {content[:200]!r}")
+    sliced = content[start : end + 1]
+
+    try:
+        return json.loads(sliced)
+    except json.JSONDecodeError:
+        pass
+
+    repaired = _repair_json(sliced)
+    try:
+        return json.loads(repaired)
+    except json.JSONDecodeError as e:
+        raise LMStudioError(
+            f"Could not parse JSON after repair attempts (last error: {e}): "
+            f"{sliced[:200]!r}"
+        ) from e
+
+
+def _repair_json(s: str, max_passes: int = 30) -> str:
+    """Best-effort repair of LLM-emitted JSON.
+
+    Cheap structural cleanups first (comments, trailing commas), then
+    iteratively asks `json.loads` to point at the next failing position
+    and applies a targeted fix there. Bounded by `max_passes` so a
+    pathological input can't loop.
+    """
+    # 1. Strip JS-style comments models sometimes emit.
+    s = _BLOCK_COMMENT_RE.sub("", s)
+    s = _strip_line_comments_outside_strings(s)
+
+    # 2. Remove trailing commas before } or ].
+    s = _strip_trailing_commas(s)
+
+    # 3. Iterative position-driven repair.
+    for _ in range(max_passes):
+        try:
+            json.loads(s)
+            return s
+        except json.JSONDecodeError as e:
+            fixed = _try_fix_at(s, e)
+            if fixed is None or fixed == s:
+                return s  # caller will surface the parse error
+            s = fixed
+    return s
+
+
+def _try_fix_at(s: str, e: json.JSONDecodeError) -> str | None:
+    """Apply a targeted edit at `e.pos` based on `e.msg`."""
+    pos = e.pos
+    msg = e.msg.lower()
+
+    # Most common: missing comma between siblings. Parser is sitting at the
+    # next token (`{`, `[`, `"`, or a literal) expecting a `,` first.
+    if "expecting ',' delimiter" in msg or "expecting comma" in msg:
+        return s[:pos] + "," + s[pos:]
+
+    # Trailing comma: parser hit `}` or `]` after a comma and complains the
+    # property name is missing. Walk back, drop the comma.
+    if "expecting property name" in msg or "expecting value" in msg:
+        i = pos - 1
+        while i >= 0 and s[i].isspace():
+            i -= 1
+        if i >= 0 and s[i] == ",":
+            return s[:i] + s[i + 1 :]
+
+    return None
+
+
+def _strip_trailing_commas(s: str) -> str:
+    """Remove `,` immediately preceding `}` or `]`, ignoring commas inside strings."""
+    out: list[str] = []
+    in_string = False
+    escape = False
+    i = 0
+    while i < len(s):
+        c = s[i]
+        if in_string:
+            out.append(c)
+            if escape:
+                escape = False
+            elif c == "\\":
+                escape = True
+            elif c == '"':
+                in_string = False
+            i += 1
+            continue
+        if c == '"':
+            in_string = True
+            out.append(c)
+            i += 1
+            continue
+        if c == ",":
+            # Look ahead past whitespace
+            j = i + 1
+            while j < len(s) and s[j].isspace():
+                j += 1
+            if j < len(s) and s[j] in "}]":
+                # Drop this comma
+                i += 1
+                continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def _strip_line_comments_outside_strings(s: str) -> str:
+    """Remove `//...` comments that appear outside of string literals."""
+    out: list[str] = []
+    in_string = False
+    escape = False
+    i = 0
+    while i < len(s):
+        c = s[i]
+        if in_string:
+            out.append(c)
+            if escape:
+                escape = False
+            elif c == "\\":
+                escape = True
+            elif c == '"':
+                in_string = False
+            i += 1
+            continue
+        if c == '"':
+            in_string = True
+            out.append(c)
+            i += 1
+            continue
+        if c == "/" and i + 1 < len(s) and s[i + 1] == "/":
+            # Skip to end of line
+            j = s.find("\n", i)
+            if j < 0:
+                break
+            i = j
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
