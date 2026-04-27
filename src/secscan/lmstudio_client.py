@@ -142,7 +142,21 @@ class LMStudioClient:
                 r = self._http.post("/chat/completions", json=payload)
                 if r.status_code < 400:
                     self._json_mode = mode
-                    content = r.json()["choices"][0]["message"]["content"]
+                    # `r.json()` can raise `json.JSONDecodeError` directly when
+                    # LM Studio returns a malformed/truncated HTTP body (seen
+                    # mid-run on long sessions). That raw exception used to
+                    # leak past every `except LMStudioError` in the codebase
+                    # — killing whole arch/synth passes that should have just
+                    # logged a per-call failure and continued. Wrap it so all
+                    # response-side parse errors land in the same bucket
+                    # `_extract_json` raises into.
+                    try:
+                        content = r.json()["choices"][0]["message"]["content"]
+                    except (json.JSONDecodeError, LookupError, TypeError, ValueError) as e:
+                        raise LMStudioError(
+                            f"Malformed LM Studio response body "
+                            f"(status {r.status_code}, mode={mode}): {e}"
+                        ) from e
                     return _extract_json(content)
                 last_err = f"{r.status_code}: {r.text[:300]}"
                 if r.status_code != 400:

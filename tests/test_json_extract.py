@@ -126,3 +126,79 @@ def test_repair_bounded_passes_does_not_loop():
     # Should return some string and not hang; downstream will raise LMStudioError
     result = _repair_json(bad, max_passes=5)
     assert isinstance(result, str)
+
+
+# ---- complete_json: response-body parse failures must surface as LMStudioError ----
+#
+# Previously a malformed HTTP body from LM Studio (truncated stream, html error
+# page, etc.) raised a raw `json.JSONDecodeError` from httpx's `r.json()`,
+# which leaked past every `except LMStudioError` in the codebase and killed
+# whole arch / synth passes. Observed live on a chia-blockchain rerun where
+# both arch_error and synth_error showed identical `Expecting ',' delimiter:
+# line 45 column 6` messages — the format of an unwrapped JSONDecodeError.
+
+class _StubResponse:
+    def __init__(self, status_code: int, json_payload=None, text: str = "",
+                 raise_on_json: Exception | None = None) -> None:
+        self.status_code = status_code
+        self._json = json_payload
+        self.text = text
+        self._raise_on_json = raise_on_json
+
+    def json(self):
+        if self._raise_on_json is not None:
+            raise self._raise_on_json
+        return self._json
+
+
+class _StubHTTP:
+    def __init__(self, response: _StubResponse) -> None:
+        self.response = response
+
+    def post(self, *_a, **_kw):
+        return self.response
+
+
+def _client_with(response: _StubResponse):
+    """Build an LMStudioClient with `_http` swapped for a stub. Avoids a real
+    socket and lets us simulate exactly the bad responses we want to test."""
+    from secscan.lmstudio_client import LMStudioClient
+    c = LMStudioClient(model="stub-model")
+    c._http = _StubHTTP(response)
+    return c
+
+
+def test_complete_json_wraps_response_body_jsondecodeerror():
+    """If httpx's r.json() raises (truncated/garbled HTTP body), complete_json
+    must surface it as LMStudioError, not a raw JSONDecodeError."""
+    import json as _json
+    bad_resp = _StubResponse(
+        status_code=200,
+        raise_on_json=_json.JSONDecodeError("Expecting ',' delimiter", "doc", 100),
+    )
+    c = _client_with(bad_resp)
+    with pytest.raises(LMStudioError, match="Malformed LM Studio response body"):
+        c.complete_json("system", "user")
+
+
+def test_complete_json_wraps_unexpected_response_shape():
+    """If LM Studio returns valid JSON but the choices/message/content path is
+    missing, that's still a malformed response — surface as LMStudioError."""
+    bad_resp = _StubResponse(
+        status_code=200,
+        json_payload={"choices": []},  # missing [0].message.content
+    )
+    c = _client_with(bad_resp)
+    with pytest.raises(LMStudioError, match="Malformed LM Studio response body"):
+        c.complete_json("system", "user")
+
+
+def test_complete_json_passes_through_good_response():
+    """Sanity: stub a clean OpenAI-shaped response; complete_json returns the
+    parsed JSON content unchanged."""
+    good_resp = _StubResponse(
+        status_code=200,
+        json_payload={"choices": [{"message": {"content": '{"ok": true}'}}]},
+    )
+    c = _client_with(good_resp)
+    assert c.complete_json("system", "user") == {"ok": True}
