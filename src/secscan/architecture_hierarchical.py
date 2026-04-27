@@ -295,14 +295,40 @@ def extract_architecture_hierarchical(
     # Merge phase
     progress("merge_start", {"subsystem_count": len(sub_archs)})
     try:
-        merged = _merge_architectures(client, repo_root, sub_archs)
+        merged = _merge_architectures(client, repo_root, sub_archs, progress=progress)
     except LMStudioError as e:
-        # Fall back to a mechanical merge if the LLM merge fails — better than nothing.
+        # LLM merge errored — fall back to a mechanical concat of subsystems.
         merged = _mechanical_merge(sub_archs)
         merged.unknowns.append(f"LLM merge pass failed: {str(e)[:120]}")
+        progress("merge_empty_fallback", {"reason": "lmstudio_error"})
+
+    # Defense in depth: a successful call can still return an empty
+    # Architecture if the model echoed `{}` or returned only whitespace
+    # (we observed this on chia-blockchain — 25 valid subsystems, empty
+    # merge). Without this branch we'd silently throw away every subsystem's
+    # work. Mechanical merge is strictly better than nothing.
+    if _arch_is_empty(merged):
+        merged = _mechanical_merge(sub_archs)
+        merged.unknowns.append(
+            "LLM merge returned empty Architecture; mechanical concat used as fallback"
+        )
+        progress("merge_empty_fallback", {"reason": "empty_llm_result"})
+
     progress("merge_done", {"components": len(merged.components),
                             "integrations": len(merged.integrations)})
     return merged
+
+
+def _arch_is_empty(arch: Architecture) -> bool:
+    """An Architecture with no structural content. Used to detect an LLM merge
+    that parse-succeeded but produced nothing useful, so we can fall back
+    instead of returning a vacuous result downstream."""
+    return not (
+        arch.components
+        or arch.integrations
+        or arch.trust_boundaries
+        or arch.data_flows
+    )
 
 
 # ---------------- merge ----------------
@@ -311,16 +337,23 @@ def _merge_architectures(
     client: LMStudioClient,
     repo_root: Path,
     sub_archs: list[tuple[str, Architecture]],
+    *,
+    progress: ProgressFn | None = None,
 ) -> Architecture:
     from .repo_context import build_context
+    progress = progress or (lambda _e, _d: None)
     # For the merge, we give the model a pruned repo tree + per-subsystem summaries
     base = build_context(repo_root)
     tree_text = base.to_prompt_text(budget_tokens=_MERGE_BUDGET_TOKENS // 2)
 
-    subs_payload = [
-        {"subsystem": name, **arch.model_dump()}
-        for name, arch in sub_archs
-    ]
+    payload_budget_chars = int(_MERGE_BUDGET_TOKENS * _CHARS_PER_TOKEN * 0.6)
+    subs_payload_text, shrink_level = _shrink_subs_payload(
+        sub_archs, max_chars=payload_budget_chars,
+    )
+    if shrink_level > 0:
+        progress("merge_payload_shrunk",
+                 {"level": shrink_level, "chars": len(subs_payload_text),
+                  "budget_chars": payload_budget_chars})
     user = dedent(f"""
         Merge these subsystem architectures into one repo-level architecture.
 
@@ -331,7 +364,7 @@ def _merge_architectures(
 
         Subsystem analyses (one per top-level directory):
         ```json
-        {json.dumps(subs_payload, indent=2)[:int(_MERGE_BUDGET_TOKENS * _CHARS_PER_TOKEN * 0.6)]}
+        {subs_payload_text}
         ```
 
         Produce the final Architecture JSON.
@@ -339,6 +372,94 @@ def _merge_architectures(
     """).strip()
     data = client.complete_json(MERGE_SYSTEM, user, max_tokens=4096, temperature=0.1)
     return _coerce_architecture(data)
+
+
+# ---------------- structural shrinking ----------------
+#
+# The previous implementation char-sliced `json.dumps(...)[:N]`, which chops a
+# JSON object mid-key and produces unparseable text in the prompt. Models then
+# returned `{}` or empty content — observed on chia-blockchain (25 valid
+# subsystems → empty merge). Instead, build progressively-leaner views of each
+# subsystem and pick the richest one that fits the budget. Every level emits
+# valid JSON.
+
+def _shrink_subs_payload(
+    sub_archs: list[tuple[str, Architecture]],
+    *,
+    max_chars: int,
+) -> tuple[str, int]:
+    """Return `(json_text, shrink_level)` where the text fits `max_chars`.
+    Levels:
+      0 = full dump
+      1 = drop high-volume fields (integration evidence_files/notes,
+          component notable_files)
+      2 = also drop entry_points, trust_boundaries.enforced_by, data_flows,
+          unknowns (keep boundary descriptions and bypass risks)
+      3 = skeleton: per-subsystem summary, component name+role,
+          integration name+kind+direction, auth_model, secrets_handling
+    Level 3 is always small enough for a sane merge budget. If even that
+    overflows we hand back the level-3 text untruncated and let the upstream
+    fallback handle it — never char-slice JSON.
+    """
+    builders = (_payload_full, _payload_light, _payload_lighter, _payload_skeleton)
+    text = ""
+    for level, build in enumerate(builders):
+        text = json.dumps(build(sub_archs), indent=2)
+        if len(text) <= max_chars:
+            return text, level
+    return text, len(builders) - 1
+
+
+def _payload_full(sub_archs: list[tuple[str, Architecture]]) -> list[dict]:
+    return [{"subsystem": name, **arch.model_dump()} for name, arch in sub_archs]
+
+
+def _payload_light(sub_archs: list[tuple[str, Architecture]]) -> list[dict]:
+    out: list[dict] = []
+    for name, arch in sub_archs:
+        d = arch.model_dump()
+        for c in d.get("components", []):
+            c.pop("notable_files", None)
+        for ig in d.get("integrations", []):
+            ig.pop("evidence_files", None)
+            ig.pop("notes", None)
+        out.append({"subsystem": name, **d})
+    return out
+
+
+def _payload_lighter(sub_archs: list[tuple[str, Architecture]]) -> list[dict]:
+    out: list[dict] = []
+    for name, arch in sub_archs:
+        d = arch.model_dump()
+        for c in d.get("components", []):
+            c.pop("notable_files", None)
+            c.pop("entry_points", None)
+        for ig in d.get("integrations", []):
+            ig.pop("evidence_files", None)
+            ig.pop("notes", None)
+        for tb in d.get("trust_boundaries", []):
+            tb.pop("enforced_by", None)
+        d.pop("data_flows", None)
+        d.pop("unknowns", None)
+        out.append({"subsystem": name, **d})
+    return out
+
+
+def _payload_skeleton(sub_archs: list[tuple[str, Architecture]]) -> list[dict]:
+    out: list[dict] = []
+    for name, arch in sub_archs:
+        out.append({
+            "subsystem": name,
+            "summary": arch.summary,
+            "components": [{"name": c.name, "role": c.role} for c in arch.components],
+            "integrations": [
+                {"name": i.name, "kind": i.kind, "direction": i.direction}
+                for i in arch.integrations
+            ],
+            "auth_model": arch.auth_model,
+            "secrets_handling": arch.secrets_handling,
+        })
+    return out
 
 
 def _mechanical_merge(sub_archs: list[tuple[str, Architecture]]) -> Architecture:
