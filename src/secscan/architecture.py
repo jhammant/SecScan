@@ -68,7 +68,13 @@ def extract_architecture(
     repo_root: Path,
     *,
     prompt_budget_tokens: int = 12_000,
-    max_tokens: int = 4096,
+    # Reasoning models (qwen3, DeepSeek-R1, etc.) burn output tokens on
+    # internal `<think>` blocks before getting to the JSON. With a 32k
+    # context and ~12k prompt budget, leaving 16k for output is safe and
+    # gives the model enough room to think AND emit a complete arch doc.
+    # Hit on a qwen3.6-27b run that returned `""` after 13 min — the
+    # think block consumed the full 4096-token budget.
+    max_tokens: int = 16384,
 ) -> Architecture:
     """Flat single-call architecture extraction.
 

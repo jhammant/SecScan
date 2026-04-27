@@ -96,7 +96,7 @@ def synthesize(client: LMStudioClient, result: RepoScanResult) -> Synthesis:
     user_payload = _build_synthesis_input(result) + "\n\n/no_think"
     try:
         data = client.complete_json(
-            SYNTHESIS_SYSTEM, user_payload, max_tokens=4096, temperature=0.15,
+            SYNTHESIS_SYSTEM, user_payload, max_tokens=16384, temperature=0.15,
         )
     except LMStudioError as e:
         return Synthesis(executive_summary=f"(synthesis failed: {e})")

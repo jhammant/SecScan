@@ -278,7 +278,7 @@ def extract_architecture_hierarchical(
                 + "\n\n/no_think"
             )
             data = client.complete_json(
-                ARCHITECTURE_SYSTEM, user, max_tokens=4096, temperature=0.1,
+                ARCHITECTURE_SYSTEM, user, max_tokens=16384, temperature=0.1,
             )
             sub_archs.append((sub.name, _coerce_architecture(data)))
             progress("subsystem_done", {"i": i, "name": sub.name})
@@ -370,7 +370,7 @@ def _merge_architectures(
         Produce the final Architecture JSON.
         /no_think
     """).strip()
-    data = client.complete_json(MERGE_SYSTEM, user, max_tokens=4096, temperature=0.1)
+    data = client.complete_json(MERGE_SYSTEM, user, max_tokens=16384, temperature=0.1)
     return _coerce_architecture(data)
 
 
