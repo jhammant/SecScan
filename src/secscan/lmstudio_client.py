@@ -35,7 +35,10 @@ class LMStudioClient:
         self.model = model
         self._http = httpx.Client(
             base_url=f"http://{host}/v1",
-            timeout=httpx.Timeout(connect=5.0, read=600.0, write=30.0, pool=30.0),
+            # 30-min read timeout: a single architecture/synthesis call on a 27B
+            # reasoning model at 32k context can easily exceed 10 min on Apple
+            # Silicon. Calls that genuinely hang are still bounded.
+            timeout=httpx.Timeout(connect=5.0, read=1800.0, write=30.0, pool=30.0),
         )
         # Cache of the response_format shape this model accepts; set on first success.
         self._json_mode: dict | None = None
