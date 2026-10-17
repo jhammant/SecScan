@@ -13,7 +13,7 @@ set -euo pipefail
 REPO="nanocurrency/nano-node"
 MODEL="qwen-32k"                  # 32768-ctx instance — large enough for architecture + synthesis passes
 LENSES="security,reliability,correctness"   # relevant for a consensus node
-SECSCAN_ROOT="/Users/jhammant/dev/SecScan"
+SECSCAN_ROOT="/Users/jhammant/dev/security/SecScan"
 LOG_DIR="${SECSCAN_ROOT}/.secscan/logs"
 TS="$(date +%Y%m%d-%H%M%S)"
 LOG_FILE="${LOG_DIR}/nano-node-${TS}.log"
